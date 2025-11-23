@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Mind Map Spiderweb — single file</title>
+
+  <!-- D3 v7 -->
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+
+  <style>
+    :root{
+      --bg:#0b1020;
+      --panel:#0f1724;
+      --muted:rgba(255,255,255,0.12);
+      --glass: rgba(255,255,255,0.04);
+      --accent:#ffffff;
+    }
+
+    html,body{height:100%;margin:0;font-family:Inter,Segoe UI,system-ui,Arial;}
+    body{
+      background: radial-gradient(1200px 600px at 10% 10%, rgba(10,13,18,0.6), transparent),
+                  radial-gradient(800px 400px at 90% 90%, rgba(18,20,28,0.35), transparent),
+                  var(--bg);
+      color:var(--accent);
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding:24px;
+      box-sizing:border-box;
+    }
+
+    .app {
+      width:100%;
+      max-width:1200px;
+      height:80vh;
+      display:flex;
+      flex-direction:column;
+      gap:12px;
+    }
+
+    header {
+      display:flex;
+      gap:12px;
+      align-items:center;
+    }
+
+    h1 {
+      font-size:20px;
+      margin:0;
+      font-weight:600;
+      color: #f7fafc;
+    }
+
+    .search {
+      flex:1;
+      display:flex;
+      gap:8px;
+      align-items:center;
+    }
+
+    .textbox {
+      flex:1;
+      padding:14px 18px;
+      border-radius:999px;
+      border:1px solid rgba(255,255,255,0.06);
+      background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+      color:var(--accent);
+      font-size:16px;
+      outline:none;
+    }
+
+    .btn {
+      padding:10px 14px;
+      border-radius:999px;
+      background:linear-gradient(180deg,#fff,#e6e6e6);
+      color:#0b1116;
+      font-weight:600;
+      cursor:pointer;
+      border:none;
+    }
+
+    .frame {
+      flex:1;
+      border-radius:12px;
+      overflow:hidden;
+      position:relative;
+      background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.02));
+      box-shadow: 0 8px 30px rgba(2,6,23,0.6);
+      display:flex;
+    }
+
+    /* svg covers frame */
+    svg {
+      width:100%;
+      height:100%;
+      display:block;
+    }
+
+    .hint {
+      font-size:13px;
+      color:var(--muted);
+      margin-top:6px;
+    }
+
+    /* Node styles (text inside svg) */
+    .node-text {
+      pointer-events:none;
+      font-size:11px;
+      fill: rgba(255,255,255,0.95);
+      text-anchor:middle;
+    }
+
+    .node-text.center {
+      font-size:16px;
+      font-weight:700;
+      fill:#080808;
+    }
+
+    .bg-label {
+      font-size:10px;
+      fill: rgba(255,255,255,0.12);
+      pointer-events:none;
+    }
+
+    /* small responsiveness */
+    @media (max-width:640px){
+      h1{font-size:16px}
+      .textbox{font-size:14px;padding:12px}
+      .btn{padding:8px 12px}
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>Mind Map Spiderweb</h1>
+      <div class="search">
+        <input id="wordInput" class="textbox" placeholder="Type a word and press Enter — e.g. creativity" />
+        <button id="goBtn" class="btn">Go</button>
+      </div>
+    </header>
+
+    <div class="frame" id="visualFrame">
+      <svg id="viz"></svg>
+    </div>
+
+    <div class="hint" id="status">Tip: drag nodes to rearrange. Uses Datamuse API for related words. Max ~100 nodes.</div>
+  </div>
+
+<script>
+/*
+  Single-file mind-map:
+  - Uses Datamuse (no API key) to fetch related words: https://api.datamuse.com/words?ml=...
+  - Builds hierarchical graph center -> level1 (5-10) -> children (3-5) -> subchildren (0-2)
+  - Caps ~100 nodes.
+  - Background spiderweb of faint words uses a subtle force sim.
+*/
+
+const SVG = d3.select("#viz");
+const frame = document.getElementById("visualFrame");
+let width = frame.clientWidth;
+let height = frame.clientHeight;
+SVG.attr("viewBox", `0 0 ${width} ${height}`);
+
+// base sample words for fallback / random background
+const SAMPLE_WORDS = [
+  "thought","idea","brain","plan","create","inspire","dream","focus","design","build",
+  "connect","flow","strategy","vision","memory","learning","research","explore","map","link",
+  "story","energy","curiosity","habit","focus","change","action","pattern","signal","rhythm"
+];
+
+// utility: fetch related words via Datamuse, returns array of word strings
+async function fetchRelated(word, max=8){
+  const url = `https://api.datamuse.com/words?ml=${encodeURIComponent(word)}&max=${max}`;
+  try {
+    const resp = await fetch(url);
+    if(!resp.ok) throw new Error("Datamuse error");
+    const data = await resp.json();
+    return data.map(d => d.word.replace(/\s+/g, "_"));
+  } catch (e) {
+    // fallback: random sample
+    return d3.shuffle(SAMPLE_WORDS).slice(0, Math.min(max, SAMPLE_WORDS.length));
+  }
+}
+
+// ---------- BACKGROUND "SPIDERWEB" ----------
+function buildBackground(){
+  // clear any previous bg
+  SVG.selectAll(".bg-group").remove();
+
+  const bgGroup = SVG.append("g").attr("class","bg-group");
+
+  // generate nodes and links
+  const bgNodes = d3.range(40).map(i => ({
+    id: `bg-${i}`,
+    label: SAMPLE_WORDS[i % SAMPLE_WORDS.length],
+    r: 4 + Math.random()*8
+  }));
+
+  const bgLinks = d3.range(60).map(() => {
+    let a = Math.floor(Math.random()*bgNodes.length);
+    let b = Math.floor(Math.random()*bgNodes.length);
+    while(b===a) b = Math.floor(Math.random()*bgNodes.length);
+    return { source: bgNodes[a].id, target: bgNodes[b].id };
+  });
+
+  // create link elements
+  const link = bgGroup.selectAll("line.bg-link")
+    .data(bgLinks)
+    .enter().append("line")
+    .attr("class","bg-link")
+    .attr("stroke","rgba(255,255,255,0.05)")
+    .attr("stroke-width",1);
+
+  // node groups with circle + text
+  const node = bgGroup.selectAll("g.bg-node")
+    .data(bgNodes)
+    .enter().append("g")
+    .attr("class","bg-node");
+
+  node.append("circle").attr("r", d => d.r).attr("fill","rgba(255,255,255,0.02)");
+  node.append("text").text(d=>d.label).attr("class","bg-label").attr("dy",3);
+
+  // force for subtle motion
+  const sim = d3.forceSimulation(bgNodes)
+    .force("link", d3.forceLink(bgLinks).id(d=>d.id).distance(40).strength(0.12))
+    .force("center", d3.forceCenter(width/2, height/2))
+    .force("charge", d3.forceManyBody().strength(-12))
+    .alpha(0.8)
+    .on("tick", () => {
+      link
+        .attr("x1", d => (bgNodes.find(n => n.id === d.source) || d.source).x)
+        .attr("y1", d => (bgNodes.find(n => n.id === d.source) || d.source).y)
+        .attr("x2", d => (bgNodes.find(n => n.id === d.target) || d.target).x)
+        .attr("y2", d => (bgNodes.find(n => n.id === d.target) || d.target).y);
+
+      node.attr("transform", d => `translate(${d.x},${d.y})`);
+    });
+
+  // calm it down after a while
+  setTimeout(()=> sim.alphaTarget(0).stop(), 4500);
+}
+
+// ---------- MIND MAP RENDER ----------
+let currentNodes = [];
+let currentLinks = [];
+let mindGroup;
+
+// helper to update svg size on resize
+function resize() {
+  width = frame.clientWidth;
+  height = frame.clientHeight;
+  SVG.attr("viewBox", `0 0 ${width} ${height}`);
+  // rebuild background and re-render current map so forces use new center
+  buildBackground();
+  if(currentNodes.length) renderMindMap(currentNodes, currentLinks);
+}
+window.addEventListener("resize", resize);
+
+// buildGraph: given center word, fetch related words and assemble nodes & links
+async function buildGraph(centerWord){
+  setStatus(`Building mind map for "${centerWord}" — fetching related words...`);
+  const center = centerWord.trim().replace(/\s+/g, "_");
+  const nodes = [{ id:center, depth:0 }];
+  const links = [];
+  const maxNodes = 100;
+
+  // level 1: fetch 8, pick 5-10
+  const level1Raw = await fetchRelated(center, 12);
+  const level1 = level1Raw.slice(0, Math.min(10, level1Raw.length));
+  level1.forEach(w => {
+    if(!nodes.find(n=>n.id===w) && nodes.length < maxNodes) nodes.push({ id:w, depth:1 });
+    links.push({ source:center, target:w });
+  });
+
+  // for each level1 word, fetch children (3-5)
+  for(const p of level1){
+    if(nodes.length >= maxNodes) break;
+    const kidsRaw = await fetchRelated(p, 6);
+    const kids = kidsRaw.slice(0, Math.min(5, kidsRaw.length));
+    for(const k of kids){
+      if(!nodes.find(n=>n.id===k) && nodes.length < maxNodes) nodes.push({ id:k, depth:2 });
+      links.push({ source:p, target:k });
+    }
+
+    // for each k, fetch up to 2 subchildren
+    for(const k of kids){
+      if(nodes.length >= maxNodes) break;
+      const sub = await fetchRelated(k, 3);
+      for(const s of sub.slice(0,2)){
+        if(!nodes.find(n=>n.id===s) && nodes.length < maxNodes) nodes.push({ id:s, depth:3 });
+        links.push({ source:k, target:s });
+      }
+    }
+  }
+
+  setStatus(`Rendering ${nodes.length} nodes...`);
+  currentNodes = nodes;
+  currentLinks = links;
+  renderMindMap(nodes, links);
+  setStatus(`Done — ${nodes.length} nodes. Drag nodes to rearrange.`);
+}
+
+// renderMindMap: draws nodes & links with d3 force
+function renderMindMap(nodes, links){
+  // remove existing mind group
+  SVG.selectAll(".mind-group").remove();
+  mindGroup = SVG.append("g").attr("class","mind-group");
+
+  // convert to d3-friendly copies
+  const d3Nodes = nodes.map(d => Object.assign({}, d));
+  const d3Links = links.map(l => ({ source:l.source, target:l.target }));
+
+  // create link elements
+  const link = mindGroup.selectAll("line.link")
+    .data(d3Links)
+    .enter().append("line")
+    .attr("class","link")
+    .attr("stroke","rgba(255,255,255,0.14)")
+    .attr("stroke-width",1.2);
+
+  // node groups
+  const node = mindGroup.selectAll("g.node")
+    .data(d3Nodes, d => d.id)
+    .enter().append("g")
+    .attr("class","node")
+    .attr("cursor","grab");
+
+  node.append("circle")
+    .attr("r", d => d.depth===0 ? 16 : d.depth===1 ? 9 : d.depth===2 ? 7 : 6)
+    .attr("fill", d => d.depth===0 ? "#ffffff" : "rgba(255,255,255,0.06)")
+    .attr("stroke", d => d.depth===0 ? "#111" : "rgba(255,255,255,0.08)")
+    .attr("stroke-width", d => d.depth===0 ? 1.6 : 0.7);
+
+  node.append("text")
+    .text(d=>d.id.replace(/_/g," "))
+    .attr("class", d => d.depth===0 ? "node-text center" : "node-text")
+    .attr("dy", d => d.depth===0 ? 6 : 4)
+    .style("font-size", d => d.depth===0 ? "16px" : d.depth===1 ? "12px" : "10px");
+
+  // force simulation
+  const simulation = d3.forceSimulation(d3Nodes)
+    .force("link", d3.forceLink(d3Links).id(d=>d.id).distance(d => {
+      // longer distance for deeper linked to give spread
+      return d.target && d.target.depth ? 60 + d.target.depth*18 : 80;
+    }).strength(0.9))
+    .force("charge", d3.forceManyBody().strength(d => d.depth===0 ? -700 : -120))
+    .force("center", d3.forceCenter(width/2, height/2))
+    .force("collide", d3.forceCollide().radius(d => (d.depth===0?36:26)))
+    .alphaDecay(0.02)
+    .on("tick", () => {
+      link
+        .attr("x1", d => d.source.x)
+        .attr("y1", d => d.source.y)
+        .attr("x2", d => d.target.x)
+        .attr("y2", d => d.target.y);
+
+      node.attr("transform", d => `translate(${d.x},${d.y})`);
+    });
+
+  // drag behavior
+  const drag = d3.drag()
+    .on("start", (event, d) => {
+      if(!event.active) simulation.alphaTarget(0.3).restart();
+      d.fx = d.x; d.fy = d.y;
+    })
+    .on("drag", (event, d) => {
+      d.fx = event.x; d.fy = event.y;
+    })
+    .on("end", (event, d) => {
+      if(!event.active) simulation.alphaTarget(0);
+      d.fx = null; d.fy = null;
+    });
+
+  mindGroup.selectAll("g.node").call(drag);
+
+  // stop simulation gently after a while to stabilize CPU usage
+  setTimeout(() => simulation.alphaTarget(0).stop(), 8000);
+
+  // center the main node (if present) — pin it briefly for better structure
+  const centerNode = d3Nodes.find(n => n.depth === 0);
+  if(centerNode){
+    centerNode.fx = width/2;
+    centerNode.fy = height/2;
+    setTimeout(()=>{ centerNode.fx = null; centerNode.fy = null; }, 1600);
+  }
+}
+
+// UI wiring
+const input = document.getElementById("wordInput");
+const goBtn = document.getElementById("goBtn");
+const statusEl = document.getElementById("status");
+
+function setStatus(msg){
+  statusEl.textContent = msg;
+}
+
+// handle submit
+async function submitWord(){
+  const word = input.value.trim();
+  if(!word) {
+    setStatus("Type a word first.");
+    return;
+  }
+  await buildGraph(word);
+}
+
+// button + enter binding
+goBtn.addEventListener("click", submitWord);
+input.addEventListener("keydown", (e)=>{
+  if(e.key === "Enter") {
+    e.preventDefault();
+    submitWord();
+  }
+});
+
+// initialize
+buildBackground();
+setStatus("Ready — type a word and press Enter or click Go.");
+
+// optional: prefill with a sample example to show functionality on load
+// you can uncomment the line below to load sample automatically
+// input.value = "creativity"; submitWord();
+
+</script>
+</body>
+</html>
